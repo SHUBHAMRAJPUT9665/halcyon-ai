@@ -1,0 +1,31 @@
+# Versions are pinned so the project behaves the same on every computer.
+# Tested with Python 3.12.
+
+# --- Web API ---
+fastapi==0.135.1
+uvicorn==0.41.0
+python-multipart==0.0.22        # needed for file uploads
+pydantic==2.12.5
+pydantic-settings==2.15.0       # reads settings from .env
+structlog==26.1.0               # structured (JSON) logging
+requests==2.34.2                # live FX rate lookup
+
+# --- LangChain v1 ---
+langchain==1.2.11               # create_agent + agent middleware
+langchain-core==1.2.18          # @tool, prompts, LCEL runnables
+langchain-community==0.4.1      # PyPDFLoader
+langchain-text-splitters==1.1.1
+langchain-google-genai==4.2.1   # Gemini chat model + embeddings (API key locally, Vertex AI in cloud)
+langgraph==1.1.6                # engine behind create_agent (installed for you; we write no graph code)
+
+# --- Local mode (APP_MODE=local) ---
+langchain-chroma==1.1.0         # Chroma vector store on disk
+chromadb==1.5.9
+
+# --- Cloud mode (APP_MODE=cloud) ---
+langchain-google-vertexai==3.2.2  # Vertex AI Vector Search store
+google-cloud-aiplatform==1.141.0
+google-cloud-storage==3.9.0
+
+# --- PDF reading ---
+pypdf==6.7.5
