@@ -1,11 +1,15 @@
+import os
 from contextlib import asynccontextmanager
 
 from config.settings import settings
 from exceptions import ConfigurationError, IngestionError
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse
+
+# import FileResponse for serving frontend files
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from logger import _LOGGER_INSTANCE
 from logger import GLOBAL_LOGGER as log
 
@@ -78,3 +82,34 @@ async def ingestion_error_handler(request: Request, exc: IngestionError):
     """An ingestion error is not a crash: tell the caller exactly what went wrong."""
     log.error("Ingestion error", error=str(exc))
     return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
+# ============================================================
+# Serve the React frontend (only exists after `npm run build`, e.g. inside Docker)
+# ============================================================
+
+frontend_dist = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "../../frontend/dist")
+)
+
+if os.path.exists(frontend_dist):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(frontend_dist, "assets")),
+        name="assets",
+    )
+
+    # Catch-all: serve a real file if it exists, otherwise index.html (React handles the route)
+    @app.get("/{catchall:path}", include_in_schema=False)
+    def serve_frontend(catchall: str):
+        if catchall.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        file_path = os.path.realpath(os.path.join(frontend_dist, catchall))
+        if file_path.startswith(frontend_dist + os.sep) and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
+else:
+    log.warning(
+        "Frontend dist not found — frontend will not be served.", path=frontend_dist
+    )
