@@ -20,8 +20,8 @@ from logger import GLOBAL_LOGGER as log
 
 
 def location() -> str:
-    """Human readblle location of the document store (local folder or GCS bucket)."""
-    if settings.is_cloud:
+    """Human readable location of the document store (local folder or GCS bucket)."""
+    if settings.GCS_BUCKET_NAME:
         return f"gs://{settings.GCS_BUCKET_NAME}/{settings.GCS_PREFIX}"
     else:
         return settings.local_upload_dir
@@ -43,7 +43,7 @@ def _bucket():
 def save(local_path: str, filename: str) -> str:
     """Keep a copy of the uploaded PDF. Returns where it was stored."""
     filename = os.path.basename(filename)
-    if settings.is_cloud:
+    if settings.GCS_BUCKET_NAME:
         blob_name = f"{settings.GCS_PREFIX}{filename}"
         _bucket().blob(blob_name).upload_from_filename(
             local_path, content_type="application/pdf"
@@ -64,7 +64,7 @@ def pdfs() -> Iterator[Iterator[tuple[str, str]]]:
     Used as a context manager because cloud files are downloaded to a temp folder
     that must be cleaned up afterwards.
     """
-    if not settings.is_cloud:
+    if not settings.GCS_BUCKET_NAME:
         folder = settings.local_upload_dir
         os.makedirs(folder, exist_ok=True)
         yield (

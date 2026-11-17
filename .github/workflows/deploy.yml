@@ -1,0 +1,148 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# One deploy at a time: a second run waits instead of racing the first.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+  SERVICE_NAME: meridian-ai-cloud-run
+  IMAGE_NAME: gcr.io/${{ secrets.GCP_PROJECT_ID }}/meridian-ai-cloud-run
+  GCS_BUCKET: ${{ secrets.GCP_PROJECT_ID }}-vector-staging
+
+jobs:
+  deploy:
+    name: Provision & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS_JSON }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      # --- Phase 1: Enable APIs ---
+      - name: Enable Required GCP APIs
+        run: |
+          gcloud services enable \
+            run.googleapis.com \
+            secretmanager.googleapis.com \
+            storage.googleapis.com \
+            logging.googleapis.com \
+            monitoring.googleapis.com \
+            cloudtrace.googleapis.com \
+            artifactregistry.googleapis.com \
+            cloudbuild.googleapis.com \
+            cloudresourcemanager.googleapis.com \
+            iam.googleapis.com \
+            generativelanguage.googleapis.com
+            
+          echo "Waiting 60 seconds for API enablement to fully propagate across GCP..."
+          sleep 60
+
+      # --- Phase 2: Storage Buckets ---
+      - name: Ensure Storage Bucket Exists
+        run: |
+          # Check and create Document Staging Bucket (GCS)
+          if ! gcloud storage buckets describe gs://${{ env.GCS_BUCKET }} >/dev/null 2>&1; then
+            echo "Creating document storage bucket gs://${{ env.GCS_BUCKET }}..."
+            gcloud storage buckets create gs://${{ env.GCS_BUCKET }} --location=${{ env.REGION }} --uniform-bucket-level-access --public-access-prevention
+          else
+            echo "Storage bucket gs://${{ env.GCS_BUCKET }} already exists."
+          fi
+
+      # --- Phase 3: Secrets ---
+      - name: Ensure Secret Manager Has API Key
+        env:
+          RAW_GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          echo "Granting Secret Manager Admin to the deployer service account..."
+          DEPLOYER_SA=$(gcloud config get account 2>/dev/null)
+          gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+            --member="serviceAccount:${DEPLOYER_SA}" \
+            --role="roles/secretmanager.admin" --condition=None >/dev/null
+
+          # Create secret container if it doesn't exist
+          if ! gcloud secrets describe GOOGLE_API_KEY >/dev/null 2>&1; then
+            echo "Creating GOOGLE_API_KEY secret container..."
+            gcloud secrets create GOOGLE_API_KEY --replication-policy="automatic"
+          fi
+
+          # Sanitize: strip all whitespace, newlines, carriage returns
+          CLEAN_KEY=$(echo -n "$RAW_GOOGLE_API_KEY" | tr -d '[:space:]')
+          echo "API Key length after sanitization: ${#CLEAN_KEY} characters"
+
+          # Add the sanitized value as a new secret version
+          echo -n "$CLEAN_KEY" | gcloud secrets versions add GOOGLE_API_KEY --data-file=-
+          echo "Successfully updated GOOGLE_API_KEY with the sanitized GitHub Secret value."
+
+          # Grant Cloud Run service account access to Secret Manager
+          echo "Granting Secret Manager permissions to Cloud Run Service Account..."
+          PROJECT_NUMBER=$(gcloud projects describe ${{ env.PROJECT_ID }} --format="value(projectNumber)")
+          gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+            --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+            --role="roles/secretmanager.secretAccessor" --condition=None >/dev/null
+
+      # --- Phase 4: Build & Deploy Application ---
+      - name: Build and Push Docker Image
+        run: |
+          echo "Granting Cloud Build permissions to the build service account..."
+          PROJECT_NUMBER=$(gcloud projects describe ${{ env.PROJECT_ID }} --format="value(projectNumber)")
+          gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+            --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+            --role="roles/cloudbuild.builds.builder" --condition=None >/dev/null
+
+          echo "Waiting 30 seconds for the IAM change to propagate..."
+          sleep 30
+
+          gcloud builds submit --tag ${{ env.IMAGE_NAME }} .
+
+      - name: Grant Cloud Run Runtime Permissions
+        run: |
+          PROJECT_NUMBER=$(gcloud projects describe ${{ env.PROJECT_ID }} --format="value(projectNumber)")
+
+          echo "Granting roles/storage.objectAdmin to the Cloud Run service account..."
+          gcloud projects add-iam-policy-binding ${{ env.PROJECT_ID }} \
+            --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+            --role="roles/storage.objectAdmin" --condition=None >/dev/null
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.IMAGE_NAME }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --port 8080 \
+            --max-instances 3 \
+            --set-env-vars="APP_MODE=local,ENVIRONMENT=production,GCP_PROJECT_ID=${{ env.PROJECT_ID }},GCP_REGION=${{ env.REGION }},GCS_BUCKET_NAME=${{ env.GCS_BUCKET }},GCS_PREFIX=uploads/,VERTEX_LLM_MODEL_NAME=gemini-3.8-flash,LOCAL_EMBEDDING_MODEL_NAME=gemini-embedding-001" \
+            --update-secrets="GOOGLE_API_KEY=GOOGLE_API_KEY:latest"
+
+      - name: Allow Public Access to Cloud Run
+        run: |
+          echo "--- Setting allUsers invoker binding on Cloud Run service ---"
+          gcloud run services add-iam-policy-binding ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --member="allUsers" \
+            --role="roles/run.invoker" \
+            --quiet
+
+          echo "--- Verifying IAM policy ---"
+          gcloud run services get-iam-policy ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }}

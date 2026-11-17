@@ -71,12 +71,8 @@ class CustomLogger:
         return structlog.get_logger(logger_name)
 
     def flush_to_gcs(self):
-        """Cloud mode only: upload the current log file to GCS. Safe to call multiple times."""
+        """Upload the current log file to GCS if configured. Safe to call multiple times."""
         if self._gcs_flushed:
-            return
-
-        # Local mode: the log file in ./logs is enough, never touch Google Cloud
-        if not settings.is_cloud:
             return
 
         gcs_bucket = settings.GCS_BUCKET_NAME
